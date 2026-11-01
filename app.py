@@ -1,4 +1,6 @@
+from datetime import datetime, timedelta
 import io
+import random
 import sqlite3
 import pandas as pd
 import plotly.express as px
@@ -18,7 +20,7 @@ st.markdown(
 )
 
 
-# --- VERİTABANI BAŞLANGICI VE OTOMATİK MİGRASYON ---
+# --- VERİTABANI BAŞLANGICI, MİGRASYON VE VARSAYILAN ÖRNEK VERİ YÜKLEME ---
 def init_db():
   with sqlite3.connect("enterprise_retail_mrp.db") as conn:
     cursor = conn.cursor()
@@ -90,9 +92,71 @@ def init_db():
     cursor.execute("PRAGMA table_info(bill_of_materials)")
     bom_columns = [col[1] for col in cursor.fetchall()]
     if "unit_cost" not in bom_columns:
-      cursor.execute("ALTER TABLE bill_of_materials ADD COLUMN unit_cost REAL DEFAULT 150.0")
+      cursor.execute(
+          "ALTER TABLE bill_of_materials ADD COLUMN unit_cost REAL DEFAULT"
+          " 150.0"
+      )
 
     conn.commit()
+
+    # Eğer veritabanı tamamen boşsa, otomatik olarak hazır örnek veriler yükle (Default Data)
+    cursor.execute("SELECT COUNT(*) FROM products")
+    if cursor.fetchone()[0] == 0:
+      random.seed(42)
+      sample_products = [
+          ("SKU-FOOT-01", "Sneaker Ayakkabı", "Adet", 45, 12, "Tedarikçi Alpha", 8, 250.0, 95.0),
+          ("SKU-APP-02", "Oversize Hoodie", "Adet", 15, 20, "Tedarikçi Beta", 5, 180.0, 92.0),
+          ("SKU-COS-03", "Cilt Bakım Serumu", "Adet", 120, 30, "Tedarikçi Gamma", 10, 95.0, 98.0),
+          ("SKU-APP-04", "Denim Kot Pantolon", "Adet", 28, 15, "Tedarikçi Alpha", 7, 210.0, 94.0),
+      ]
+
+      for sku, p_name, unit, stock, lead_time, sup_name, l_days, u_cost, rel_score in sample_products:
+        cursor.execute(
+            "INSERT INTO products (product_code, product_name, unit) VALUES (?, ?, ?)",
+            (sku, f"{p_name} ({sku})", unit),
+        )
+        p_id = cursor.lastrowid
+
+        cursor.execute(
+            "INSERT INTO inventory (product_id, current_stock, safety_stock) VALUES (?, ?, ?)",
+            (p_id, stock, stock * 0.3),
+        )
+
+        cursor.execute(
+            "INSERT INTO suppliers (product_id, supplier_name, lead_time_days, unit_cost, reliability_score) VALUES (?, ?, ?, ?, ?)",
+            (p_id, sup_name, l_days, u_cost, rel_score),
+        )
+
+        ex_date = (datetime.now() + timedelta(days=random.randint(2, 10))).strftime("%Y-%m-%d")
+        re_date = (datetime.now() + timedelta(days=random.randint(15, 30))).strftime("%Y-%m-%d")
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO shipment_tracking 
+            (product_code, ex_factory_date, retail_target_date, cps_status, plm_sync_status)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (sku, ex_date, re_date, "Sistem Onaylandı", "PLM Aktif (24s Güncel)"),
+        )
+
+        components = [
+            (sku, "Ana Bileşen / Kumaş", 1.0, 50.0, 120.0),
+            (sku, "Aksesuar & Ambalaj", 2.0, 100.0, 30.0),
+        ]
+        cursor.executemany(
+            "INSERT INTO bill_of_materials (parent_sku, component_name, quantity_needed, component_stock, unit_cost) VALUES (?, ?, ?, ?, ?)",
+            components,
+        )
+
+      # Örnek fason siparişleri ekle
+      cursor.execute("""
+            INSERT OR IGNORE INTO fason_orders (master_order_no, parent_sku, subcontractor_name, order_qty, status, inspection_date)
+            VALUES ('MO-2026-01', 'SKU-FOOT-01', 'Partner Atölye Ltd.', 500, 'Üretimde', '2026-06-15')
+        """)
+      cursor.execute("""
+            INSERT OR IGNORE INTO fason_orders (master_order_no, parent_sku, subcontractor_name, order_qty, status, inspection_date)
+            VALUES ('MO-2026-02', 'SKU-APP-02', 'Tekstil Atölyesi A.Ş.', 750, 'Kalite Kontrolde (Inspection)', '2026-06-20')
+        """)
+      conn.commit()
 
 
 init_db()
@@ -163,9 +227,6 @@ with st.sidebar:
           cursor.execute("DELETE FROM fason_orders")
           cursor.execute("DELETE FROM shipment_tracking")
 
-          import random
-          from datetime import datetime, timedelta
-
           random.seed(42)
 
           for _, row in df_upload.iterrows():
@@ -204,13 +265,26 @@ with st.sidebar:
                 (p_id, sup_name, lead_time, unit_cost, reliability_score),
             )
 
-            ex_date = (datetime.now() + timedelta(days=random.randint(2, 20))).strftime("%Y-%m-%d")
-            re_date = (datetime.now() + timedelta(days=random.randint(25, 45))).strftime("%Y-%m-%d")
-            cursor.execute("""
+            ex_date = (
+                datetime.now() + timedelta(days=random.randint(2, 20))
+            ).strftime("%Y-%m-%d")
+            re_date = (
+                datetime.now() + timedelta(days=random.randint(25, 45))
+            ).strftime("%Y-%m-%d")
+            cursor.execute(
+                """
                 INSERT OR REPLACE INTO shipment_tracking 
                 (product_code, ex_factory_date, retail_target_date, cps_status, plm_sync_status)
                 VALUES (?, ?, ?, ?, ?)
-            """, (sku, ex_date, re_date, "Sistem Onaylandı", "PLM Aktif (24s Güncel)"))
+            """,
+                (
+                    sku,
+                    ex_date,
+                    re_date,
+                    "Sistem Onaylandı",
+                    "PLM Aktif (24s Güncel)",
+                ),
+            )
 
             p_lower = p_name.lower()
             if (
@@ -255,7 +329,8 @@ with st.sidebar:
 
             cursor.executemany(
                 "INSERT INTO bill_of_materials (parent_sku, component_name,"
-                " quantity_needed, component_stock, unit_cost) VALUES (?, ?, ?, ?, ?)",
+                " quantity_needed, component_stock, unit_cost) VALUES (?, ?, ?,"
+                " ?, ?)",
                 components,
             )
 
@@ -309,7 +384,9 @@ for r in rows:
 
 with sqlite3.connect("enterprise_retail_mrp.db") as conn:
   cursor = conn.cursor()
-  cursor.execute("SELECT SUM(quantity_needed * unit_cost) FROM bill_of_materials")
+  cursor.execute(
+      "SELECT SUM(quantity_needed * unit_cost) FROM bill_of_materials"
+  )
   total_bom_exposure = cursor.fetchone()[0] or 0.0
 
 col1, col2, col3, col4 = st.columns(4)
@@ -325,28 +402,32 @@ col4.metric("💰 Toplam BOM Finansal Risk", f"${total_bom_exposure:,.2f}")
 
 st.markdown("---")
 
-# --- YENİ EKLENEN ÖZELLİK: OTOMATİK HAFTALIK YÖNETİCİ ÖZET RAPORU (EXECUTIVE SUMMARY) ---
+# --- OTOMATİK HAFTALIK YÖNETİCİ ÖZET RAPORU (EXECUTIVE SUMMARY) ---
 st.subheader("📋 Otomatik Haftalık Yönetici Özet Raporu (Executive Summary)")
 st.markdown(
-    "Planlama uzmanının yöneticisine sunduğu haftalık konsolide operasyon özetini "
-    "tek tuşla metin raporu olarak görüntüleyin ve kopyalayın."
+    "Planlama uzmanının yöneticisine sunduğu haftalık konsolide operasyon özetini"
+    " tek tuşla metin raporu olarak görüntüleyin ve kopyalayın."
 )
 
 if total_skus > 0:
   executive_summary_text = f"""
-  --- HAFTALIK TEDARİK ZİNCİRİ VE OPERASYON ÖZET RAPORU ---
-  • Toplam İncelenen SKU Sayısı: {total_skus}
-  • Kritik Risk Altındaki / Acil Sipariş Bekleyen SKU: {risk_count}
-  • Günlük Simüle Mağaza Talep Hızı: {daily_demand} Adet/Gün
-  • Toplam Ürün Ağacı (BOM) Finansal Risk Maliyeti: ${total_bom_exposure:,.2f}
-  
-  YÖNETİCİ NOTU: 
-  Sistem genelinde kritik eşikteki ürünler için fason atölyeleri ve tedarikçi firmalar ile 
-  görüşmeler sağlanmış olup, PLM/ASAS sevkıyat takipleri güncel olarak izlenmektedir.
-  ------------------------------------------------------------
-  """
-  st.text_area("Yöneticiye Sunulacak Özet Rapor Metni:", value=executive_summary_text.strip(), height=180)
-  
+    --- HAFTALIK TEDARİK ZİNCİRİ VE OPERASYON ÖZET RAPORU ---
+    • Toplam İncelenen SKU Sayısı: {total_skus}
+    • Kritik Risk Altındaki / Acil Sipariş Bekleyen SKU: {risk_count}
+    • Günlük Simüle Mağaza Talep Hızı: {daily_demand} Adet/Gün
+    • Toplam Ürün Ağacı (BOM) Finansal Risk Maliyeti: ${total_bom_exposure:,.2f}
+    
+    YÖNETİCİ NOTU: 
+    Sistem genelinde kritik eşikteki ürünler için fason atölyeleri ve tedarikçi firmalar ile 
+    görüşmeler sağlanmış olup, PLM/ASAS sevkıyat takipleri güncel olarak izlenmektedir.
+    ------------------------------------------------------------
+    """
+  st.text_area(
+      "Yöneticiye Sunulacak Özet Rapor Metni:",
+      value=executive_summary_text.strip(),
+      height=180,
+  )
+
   st.download_button(
       label="📥 Haftalık Yönetici Özet Raporunu İndir (TXT)",
       data=executive_summary_text.strip(),
@@ -354,7 +435,10 @@ if total_skus > 0:
       mime="text/plain",
   )
 else:
-  st.info("Yönetici özet raporunu oluşturmak için lütfen sol menüden veri seti yükleyin.")
+  st.info(
+      "Yönetici özet raporunu oluşturmak için lütfen sol menüden veri seti"
+      " yükleyin."
+  )
 
 st.markdown("---")
 
@@ -362,29 +446,82 @@ st.markdown("---")
 st.subheader("📊 Tedarikçi Bazlı Sipariş Ciro & Ağırlıklı Ortalama Marj Kokpiti")
 
 demo_pivot_data = [
-    {"ÜRETİCİ": "Tedarikçi Alpha", "MODEL ADI": "MODEL-A1", "ADET": 7568, "ATÖLYE FİYATI": 221.0, "SATIS FİYATI": 243.0},
-    {"ÜRETİCİ": "Tedarikçi Alpha", "MODEL ADI": "MODEL-A2", "ADET": 9872, "ATÖLYE FİYATI": 221.0, "SATIS FİYATI": 243.0},
-    {"ÜRETİCİ": "Tedarikçi Beta", "MODEL ADI": "MODEL-B1", "ADET": 11544, "ATÖLYE FİYATI": 241.7, "SATIS FİYATI": 260.0},
-    {"ÜRETİCİ": "Tedarikçi Alpha", "MODEL ADI": "MODEL-A3", "ADET": 7602, "ATÖLYE FİYATI": 250.0, "SATIS FİYATI": 275.0},
-    {"ÜRETİCİ": "Tedarikçi Gamma", "MODEL ADI": "MODEL-G1", "ADET": 11448, "ATÖLYE FİYATI": 195.0, "SATIS FİYATI": 214.5},
-    {"ÜRETİCİ": "Tedarikçi Gamma", "MODEL ADI": "MODEL-G2", "ADET": 10590, "ATÖLYE FİYATI": 195.0, "SATIS FİYATI": 214.5},
+    {
+        "ÜRETİCİ": "Tedarikçi Alpha",
+        "MODEL ADI": "MODEL-A1",
+        "ADET": 7568,
+        "ATÖLYE FİYATI": 221.0,
+        "SATIS FİYATI": 243.0,
+    },
+    {
+        "ÜRETİCİ": "Tedarikçi Alpha",
+        "MODEL ADI": "MODEL-A2",
+        "ADET": 9872,
+        "ATÖLYE FİYATI": 221.0,
+        "SATIS FİYATI": 243.0,
+    },
+    {
+        "ÜRETİCİ": "Tedarikçi Beta",
+        "MODEL ADI": "MODEL-B1",
+        "ADET": 11544,
+        "ATÖLYE FİYATI": 241.7,
+        "SATIS FİYATI": 260.0,
+    },
+    {
+        "ÜRETİCİ": "Tedarikçi Alpha",
+        "MODEL ADI": "MODEL-A3",
+        "ADET": 7602,
+        "ATÖLYE FİYATI": 250.0,
+        "SATIS FİYATI": 275.0,
+    },
+    {
+        "ÜRETİCİ": "Tedarikçi Gamma",
+        "MODEL ADI": "MODEL-G1",
+        "ADET": 11448,
+        "ATÖLYE FİYATI": 195.0,
+        "SATIS FİYATI": 214.5,
+    },
+    {
+        "ÜRETİCİ": "Tedarikçi Gamma",
+        "MODEL ADI": "MODEL-G2",
+        "ADET": 10590,
+        "ATÖLYE FİYATI": 195.0,
+        "SATIS FİYATI": 214.5,
+    },
 ]
 
 df_pivot_input = pd.DataFrame(demo_pivot_data)
-df_pivot_input["Toplam Maliyet (₺)"] = df_pivot_input["ADET"] * df_pivot_input["ATÖLYE FİYATI"]
-df_pivot_input["Toplam Ciro (₺)"] = df_pivot_input["ADET"] * df_pivot_input["SATIS FİYATI"]
-df_pivot_input["Toplam Kâr (₺)"] = df_pivot_input["Toplam Ciro (₺)"] - df_pivot_input["Toplam Maliyet (₺)"]
+df_pivot_input["Toplam Maliyet (₺)"] = (
+    df_pivot_input["ADET"] * df_pivot_input["ATÖLYE FİYATI"]
+)
+df_pivot_input["Toplam Ciro (₺)"] = (
+    df_pivot_input["ADET"] * df_pivot_input["SATIS FİYATI"]
+)
+df_pivot_input["Toplam Kâr (₺)"] = (
+    df_pivot_input["Toplam Ciro (₺)"] - df_pivot_input["Toplam Maliyet (₺)"]
+)
 
-supplier_pivot = df_pivot_input.groupby("ÜRETİCİ").agg({
-    "ADET": "sum",
-    "Toplam Maliyet (₺)": "sum",
-    "Toplam Ciro (₺)": "sum",
-    "Toplam Kâr (₺)": "sum"
-}).reset_index()
+supplier_pivot = (
+    df_pivot_input.groupby("ÜRETİCİ")
+    .agg({
+        "ADET": "sum",
+        "Toplam Maliyet (₺)": "sum",
+        "Toplam Ciro (₺)": "sum",
+        "Toplam Kâr (₺)": "sum",
+    })
+    .reset_index()
+)
 
-supplier_pivot["Ağırlıklı Ort. Maliyet (₺)"] = (supplier_pivot["Toplam Maliyet (₺)"] / supplier_pivot["ADET"]).round(2)
-supplier_pivot["Ağırlıklı Ort. Satış (₺)"] = (supplier_pivot["Toplam Ciro (₺)"] / supplier_pivot["ADET"]).round(2)
-supplier_pivot["Ağırlıklı Marj (%)"] = ((supplier_pivot["Toplam Kâr (₺)"] / supplier_pivot["Toplam Ciro (₺)"]) * 100).round(2)
+supplier_pivot["Ağırlıklı Ort. Maliyet (₺)"] = (
+    supplier_pivot["Toplam Maliyet (₺)"] / supplier_pivot["ADET"]
+).round(2)
+supplier_pivot["Ağırlıklı Ort. Satış (₺)"] = (
+    supplier_pivot["Toplam Ciro (₺)"] / supplier_pivot["ADET"]
+).round(2)
+supplier_pivot["Ağırlıklı Marj (%)"] = (
+    (supplier_pivot["Toplam Kâr (₺)"] / supplier_pivot["Toplam Ciro (₺)"])
+    * 100
+).round(2)
 
 p_col1, p_col2 = st.columns([2, 1])
 
@@ -398,7 +535,7 @@ with p_col2:
       names="ÜRETİCİ",
       values="Toplam Ciro (₺)",
       title="💰 Tedarikçi Ciro Dağılım Payı",
-      hole=0.4
+      hole=0.4,
   )
   st.plotly_chart(fig_supplier_ciro, use_container_width=True)
 
@@ -446,39 +583,41 @@ st.subheader("📈 Operasyonel Görselleştirme Paneli")
 chart_col1, chart_col2 = st.columns(2)
 
 with chart_col1:
-  risk_counts = df["_status_short"].value_counts().reset_index()
-  risk_counts.columns = ["Risk Durumu", "Adet"]
-  fig_pie = px.pie(
-      risk_counts,
-      names="Risk Durumu",
-      values="Adet",
-      title="🎯 SKU Risk Dağılım Oranı",
-      hole=0.4,
-      color="Risk Durumu",
-      color_discrete_map={
-          "Kritik Risk": "#ff4d4d",
-          "Stok Tükendi": "#800000",
-          "Güvenli Seviye": "#2ecc71",
-      },
-  )
-  st.plotly_chart(fig_pie, use_container_width=True)
+  if not df.empty and "_status_short" in df.columns:
+    risk_counts = df["_status_short"].value_counts().reset_index()
+    risk_counts.columns = ["Risk Durumu", "Adet"]
+    fig_pie = px.pie(
+        risk_counts,
+        names="Risk Durumu",
+        values="Adet",
+        title="🎯 SKU Risk Dağılım Oranı",
+        hole=0.4,
+        color="Risk Durumu",
+        color_discrete_map={
+            "Kritik Risk": "#ff4d4d",
+            "Stok Tükendi": "#800000",
+            "Güvenli Seviye": "#2ecc71",
+        },
+    )
+    st.plotly_chart(fig_pie, use_container_width=True)
 
 with chart_col2:
-  df_risky_chart = df[df["_status_short"].isin(["Kritik Risk", "Stok Tükendi"])]
-  if not df_risky_chart.empty:
-    sup_risk = df_risky_chart["Tedarikçi Firma"].value_counts().reset_index()
-    sup_risk.columns = ["Tedarikçi Firma", "Riskli SKU Sayısı"]
-    fig_bar = px.bar(
-        sup_risk,
-        x="Tedarikçi Firma",
-        y="Riskli SKU Sayısı",
-        title="⚠️ Tedarikçi Bazlı Kritik Risk Adetleri",
-        color="Riskli SKU Sayısı",
-        color_continuous_scale="Reds",
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-  else:
-    st.info("✨ Mevcut talep hızında riskli tedarikçi bulunmuyor.")
+  if not df.empty and "_status_short" in df.columns:
+    df_risky_chart = df[df["_status_short"].isin(["Kritik Risk", "Stok Tükendi"])]
+    if not df_risky_chart.empty:
+      sup_risk = df_risky_chart["Tedarikçi Firma"].value_counts().reset_index()
+      sup_risk.columns = ["Tedarikçi Firma", "Riskli SKU Sayısı"]
+      fig_bar = px.bar(
+          sup_risk,
+          x="Tedarikçi Firma",
+          y="Riskli SKU Sayısı",
+          title="⚠️ Tedarikçi Bazlı Kritik Risk Adetleri",
+          color="Riskli SKU Sayısı",
+          color_continuous_scale="Reds",
+      )
+      st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+      st.info("✨ Mevcut talep hızında riskli tedarikçi bulunmuyor.")
 
 st.markdown("---")
 
@@ -495,294 +634,7 @@ with plm_col1:
     skus_for_plm = [row[0] for row in cursor.fetchall()]
 
   if skus_for_plm:
-    p_sku_sel = st.selectbox("Seçilen SKU Kodu", skus_for_plm, key="plm_sku_select")
-    new_ex_date = st.date_input("Yeni Ex-Factory (Fabrika Çıkış) Tarihi")
-    new_ret_date = st.date_input("Yeni Retail (Mağaza Varış) Tarihi")
-    new_cps_status = st.selectbox("CPS / ASAS Durum Güncellemesi", ["Sevk Edildi", "Üretimde Bekliyor", "Gecikmede", "Normal"])
-
-    if st.button("🔄 PLM / ASAS Tablosunu Güncelle", type="primary"):
-      try:
-        with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-          cursor = conn.cursor()
-          cursor.execute("""
-              INSERT OR REPLACE INTO shipment_tracking 
-              (product_code, ex_factory_date, retail_target_date, cps_status, plm_sync_status)
-              VALUES (?, ?, ?, ?, ?)
-          """, (p_sku_sel, str(new_ex_date), str(new_ret_date), new_cps_status, "Manuel Revize Edildi"))
-          conn.commit()
-        st.success(f"✅ {p_sku_sel} nolu ürünün sevk tarihleri ve CPS durumu güncellendi!")
-        st.rerun()
-      except Exception as e:
-        st.error(f"Hata: {e}")
-  else:
-    st.info("Tarih takibi için önce sol menüden veri seti yükleyin.")
-
-with plm_col2:
-  st.markdown("### 📊 Otomatik ASAS / PLM Takip Özeti")
-  with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-    ship_df = pd.read_sql_query("SELECT product_code AS 'SKU', ex_factory_date AS 'Ex-Factory', retail_target_date AS 'Retail Hedef', cps_status AS 'CPS Durum', plm_sync_status AS 'PLM Veri' FROM shipment_tracking", conn)
-
-  if not ship_df.empty:
-    st.dataframe(ship_df, use_container_width=True, hide_index=True)
-  else:
-    st.info("Henüz yüklenmiş sevkiyat takip kaydı bulunmuyor.")
-
-st.markdown("---")
-
-# --- TEDARİKÇİ MALİYET & PERFORMANS OPTİMİZASYON MATRİXİ ---
-st.subheader("💡 Tedarikçi Maliyet & Performans Optimizasyon Matrisi")
-
-if not df.empty:
-  supplier_summary = (
-      df.groupby("Tedarikçi Firma")
-      .agg({
-          "SKU Kodu": "count",
-          "Birim Maliyet ($)": "mean",
-          "Tedarik Süresi (Gün)": "mean",
-          "Güvenilirlik (%)": "mean",
-      })
-      .reset_index()
-  )
-
-  supplier_summary.columns = [
-      "Tedarikçi Firma",
-      "Yönetilen SKU Sayısı",
-      "Ort. Birim Maliyet ($)",
-      "Ort. Teslim Süresi (Gün)",
-      "Ort. Güvenilirlik Skoru (%)",
-  ]
-  supplier_summary["Ort. Birim Maliyet ($)"] = supplier_summary[
-      "Ort. Birim Maliyet ($)"
-  ].round(2)
-  supplier_summary["Ort. Teslim Süresi (Gün)"] = supplier_summary[
-      "Ort. Teslim Süresi (Gün)"
-  ].round(1)
-  supplier_summary["Ort. Güvenilirlik Skoru (%)"] = supplier_summary[
-      "Ort. Güvenilirlik Skoru (%)"
-  ].round(1)
-
-  best_cost = supplier_summary.loc[
-      supplier_summary["Ort. Birim Maliyet ($)"].idxmin()
-  ]["Tedarikçi Firma"]
-  best_speed = supplier_summary.loc[
-      supplier_summary["Ort. Teslim Süresi (Gün)"].idxmin()
-  ]["Tedarikçi Firma"]
-  best_reliable = supplier_summary.loc[
-      supplier_summary["Ort. Güvenilirlik Skoru (%)"].idxmax()
-  ]["Tedarikçi Firma"]
-
-  opt_col1, opt_col2 = st.columns([2, 1])
-
-  with opt_col1:
-    st.dataframe(
-        supplier_summary, use_container_width=True, hide_index=True
+    p_sku_sel = st.selectbox(
+        "Seçilen SKU Kodu", skus_for_plm, key="plm_sku_select"
     )
-
-  with opt_col2:
-    st.markdown("### 🏆 Yapay Zeka Karar Önerisi")
-    st.info(f"💰 **En Ekonomik Tedarikçi:** {best_cost}")
-    st.success(f"⚡ **En Hızlı / Çevik Tedarikçi:** {best_speed}")
-    st.warning(f"🛡️ **En Güvenilir / Kaliteli Tedarikçi:** {best_reliable}")
-
-st.markdown("---")
-
-# --- AKILLİ BOM & ME2K MALZEME EŞLEME KOKPİTİ ---
-st.subheader("🛠️ Akıllı Ürün Ağacı (BOM) & Malzeme Eşleme Kokpiti (ME2K Simülasyonu)")
-
-with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-  cursor = conn.cursor()
-  cursor.execute("SELECT product_code, product_name FROM products")
-  model_rows = cursor.fetchall()
-
-if model_rows:
-  cockpit_col1, cockpit_col2 = st.columns(2)
-
-  with cockpit_col1:
-    selected_target_model = st.selectbox(
-        "Hedef Ürün Modeli (Parent SKU)",
-        [f"{r[0]} - {r[1]}" for r in model_rows],
-        key="smart_bom_target_sku",
-    )
-    target_sku_code = selected_target_model.split(" - ")[0]
-
-  with cockpit_col2:
-    pasted_material_codes = st.text_area(
-        "SD Belgesi / Malzeme Bileşenlerini Yapıştırın (Her satıra bir bileşen)",
-        placeholder="Örn:\nSezonluk Özel Aksesuar\nDestek Karton",
-        key="smart_bom_pasted_area",
-    )
-
-  if st.button("🔍 Malzemeleri Doğrula ve BOM Hiyerarşisine Ekle", type="primary"):
-    if target_sku_code and pasted_material_codes:
-      raw_items = [
-          item.strip()
-          for item in pasted_material_codes.replace(",", "\n").split("\n")
-          if item.strip()
-      ]
-
-      with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-        cursor = conn.cursor()
-        added_count = 0
-        for comp_name in raw_items:
-          cursor.execute(
-              "SELECT COUNT(*) FROM bill_of_materials WHERE parent_sku = ? AND"
-              " component_name = ?",
-              (target_sku_code, comp_name),
-          )
-          exists = cursor.fetchone()[0]
-          if not exists:
-            cursor.execute(
-                "INSERT INTO bill_of_materials (parent_sku, component_name,"
-                " quantity_needed, component_stock, unit_cost) VALUES (?, ?, ?, ?, ?)",
-                (target_sku_code, comp_name, 1.0, 75.0, 150.0),
-            )
-            added_count += 1
-        conn.commit()
-
-      st.success(
-          f"✅ Başarılı! {added_count} yeni bileşen '{target_sku_code}' nolu"
-          " modelin Ürün Ağacına (BOM) eklendi."
-      )
-      st.rerun()
-    else:
-      st.error("Lütfen bir hedef model seçin ve bileşen listesini girin.")
-else:
-  st.info("Veritabanında ürün bulunmuyor. Önce sol menüden veri seti yükleyin.")
-
-st.markdown("---")
-
-# --- FASON ÜRETİM & KALİTE MUAYENE (QM) KOKPİTİ ---
-st.subheader("🏭 Fason Üretim & Kalite Muayene (Inspection Lot) Kokpiti")
-
-fason_col1, fason_col2 = st.columns(2)
-
-with fason_col1:
-  st.markdown("### 📝 Yeni Fason Master Order & QM Girişi")
-  with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-    cursor = conn.cursor()
-    cursor.execute("SELECT product_code FROM products")
-    skus_for_fason = [row[0] for row in cursor.fetchall()]
-
-  if skus_for_fason:
-    f_sku = st.selectbox("Fason Üretilecek SKU", skus_for_fason, key="fason_sku_select")
-    f_subcontractor = st.text_input("Fason Üretici / Atölye Adı", value="Örn: Partner Atölye Ltd.")
-    f_order_no = st.text_input("Master Order Kodu", value="MO-2026-9901")
-    f_qty = st.number_input("Üretim / Sipariş Adedi", min_value=1, value=500)
-    f_status = st.selectbox("Süreç Durumu", ["Üretimde", "Kalite Kontrolde (Inspection)", "Onaylandı / Stokta"])
-    f_insp_date = st.date_input("Inspection (Muayene) Tarihi")
-
-    if st.button("🚀 Master Order ve Inspection Lot Oluştur", type="primary"):
-      try:
-        with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-          cursor = conn.cursor()
-          cursor.execute("""
-              INSERT OR REPLACE INTO fason_orders 
-              (master_order_no, parent_sku, subcontractor_name, order_qty, status, inspection_date)
-              VALUES (?, ?, ?, ?, ?, ?)
-          """, (f_order_no, f_sku, f_subcontractor, f_qty, f_status, str(f_insp_date)))
-          conn.commit()
-        st.success(f"✅ {f_order_no} nolu Master Order başarıyla oluşturuldu ve Inspection Lot bağlandı!")
-        st.rerun()
-      except Exception as e:
-        st.error(f"Hata: {e}")
-  else:
-    st.info("Fason emirleri açmak için önce sol menüden veri seti yükleyin.")
-
-with fason_col2:
-  st.markdown("### 📋 Aktif Fason & Kalite Takip Paneli")
-  with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-    fason_df = pd.read_sql_query("SELECT master_order_no AS 'Master Order', parent_sku AS 'SKU', subcontractor_name AS 'Fasoncu', order_qty AS 'Adet', status AS 'Durum', inspection_date AS 'Muayene Tarihi' FROM fason_orders", conn)
-
-  if not fason_df.empty:
-    st.dataframe(fason_df, use_container_width=True, hide_index=True)
-  else:
-    st.info("Henüz oluşturulmuş aktif fason master order kaydı bulunmuyor.")
-
-st.markdown("---")
-
-# --- ÇOKLU SEVİYE HİYERARŞİK BOM PATLATMA ---
-st.subheader("🌳 Çoklu Seviye Hiyerarşik BOM (Ürün Ağacı) Patlatma Simülasyonu")
-
-with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-  cursor = conn.cursor()
-  cursor.execute("SELECT product_code FROM products")
-  available_skus = [row[0] for row in cursor.fetchall()]
-
-if available_skus:
-  bom_col1, bom_col2 = st.columns([1, 2])
-
-  with bom_col1:
-    selected_parent = st.selectbox(
-        "İncelenecek / Satılacak Ürün SKU:", available_skus
-    )
-    sold_quantity = st.number_input(
-        "Simüle Edilen Satış Adedi:", min_value=1, max_value=1000, value=15
-    )
-
-  with bom_col2:
-    with sqlite3.connect("enterprise_retail_mrp.db") as conn:
-      bom_df = pd.read_sql_query(
-          f"SELECT component_name AS 'Alt Bileşen', quantity_needed AS 'Birim"
-          f" Başına İhtiyaç', component_stock AS 'Depo Mevcut Stok', unit_cost AS 'Birim Maliyet ($)' FROM"
-          f" bill_of_materials WHERE parent_sku = '{selected_parent}'",
-          conn,
-      )
-
-    if not bom_df.empty:
-      bom_df["Toplam Gereksinim"] = (
-          bom_df["Birim Başına İhtiyaç"] * sold_quantity
-      )
-      bom_df["Kalan Net Stok"] = (
-          bom_df["Depo Mevcut Stok"] - bom_df["Toplam Gereksinim"]
-      )
-      bom_df["Bileşen Durumu"] = bom_df["Kalan Net Stok"].apply(
-          lambda x: "✅ Yeterli Stok"
-          if x >= 0
-          else f"🚨 EKSİK ({abs(round(x, 1))}) Adet!"
-      )
-      bom_df["Toplam Bileşen Maliyeti ($)"] = bom_df["Birim Başına İhtiyaç"] * bom_df["Birim Maliyet ($)"]
-
-      st.markdown(
-          f"**{selected_parent}** için Kategoriye Özel Ürün Ağacı (BOM) Patlatma"
-          " Sonucu & Maliyet Dağılımı:"
-      )
-      st.dataframe(bom_df, use_container_width=True, hide_index=True)
-else:
-  st.warning("Lütfen sol menüden veri setini yeniden yükleyin.")
-
-st.markdown("---")
-
-# --- RAPOR DIŞA AKTARMA (EXECUTIVE EXPORT) BÖLÜMÜ ---
-st.subheader("📊 Stok Erime ve Tedarik Gecikme Detay Tablosu")
-
-df_risky = df[df["_status_short"].isin(["Kritik Risk", "Stok Tükendi"])].copy()
-
-export_col1, export_col2 = st.columns([1, 1])
-
-with export_col1:
-  csv_all = df.drop(columns=["_status_short"]).to_csv(index=False).encode(
-      "utf-8-sig"
-  )
-  st.download_button(
-      label="📥 Tüm Envanter Analiz Raporunu İndir (Excel/CSV)",
-      data=csv_all,
-      file_name="Tüm_Envanter_MRP_Raporu.csv",
-      mime="text/csv",
-  )
-
-with export_col2:
-  if not df_risky.empty:
-    csv_risky = df_risky.drop(columns=["_status_short"]).to_csv(index=False).encode(
-        "utf-8-sig"
-    )
-    st.download_button(
-        label="🚨 Acil Sipariş & Kritik Risk Raporunu İndir (Yönetici Özel)",
-        data=csv_risky,
-        file_name="Kritik_Risk_Acil_Siparis_Listesi.csv",
-        mime="text/csv",
-    )
-  else:
-    st.success("✅ Şu an acil sipariş gerektiren kritik riskli ürün yok.")
-
-
-# SATIR RENKLENDİRME FONKS
+    new_ex_date
